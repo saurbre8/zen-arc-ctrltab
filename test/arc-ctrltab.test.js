@@ -40,20 +40,26 @@ function load(prefValues = {}) {
     documentElement: {},
     createElementNS: () => { const e = new El(); made.push(e); return e; },
     removeEventListener(t) { this.removed.push(t); },
+    addEventListener(t) { this.added.push(t); },
+    added: [],
   };
   const calls = [];
   const native = {
     previewsPerRow: 7, onKeyDown(e) { calls.push('onKeyDown'); }, isOpen: true, previewColumnCount: 2,
+    _recentlyUsedTabs: [], _init() {}, advanceFocus(fwd) { calls.push(fwd ? 'next' : 'prev'); },
+    showAllTabs() { calls.push('showAll'); }, pick() { calls.push('pick'); },
     previews: [], updatePreview() {}, open() { this._timer = 7; },
     tabs: [],
     get tabList() { return this.tabs; },
     handleEvent(e) { calls.push(e.type); },
   };
+  const tabbox = {};
+  const gBrowser = { warmupTab() {}, tabbox, visibleTabs: [{}, {}, {}], TabMetrics: { METRIC_SOURCE: {}, userTriggeredContext() {} }, setSelectedTab() { calls.push('select'); } };
   const win = { tabPreviews: { aspectRatio: 0.625, get: () => Promise.resolve('thumb') }, tabPreviewPanelHelper: { opening() { calls.push('opening'); } }, innerWidth: 1000, innerHeight: 800, listeners: {}, addEventListener(t, f) { (this.listeners[t] ||= []).push(f); } };
   const ShortcutUtils = { CYCLE_TABS: 'cycle', getSystemActionForEvent: (e) => e.action };
   env = { document: doc };
-  new Function('window', 'document', 'Services', 'ctrlTab', 'screen', 'gBrowser', 'ShortcutUtils', code)(win, doc, Services, native, {}, { warmupTab() {} }, ShortcutUtils);
-  return { store, panel, list, native, win, calls, made };
+  new Function('window', 'document', 'Services', 'ctrlTab', 'screen', 'gBrowser', 'ShortcutUtils', code)(win, doc, Services, native, {}, gBrowser, ShortcutUtils);
+  return { store, panel, list, native, win, calls, made, tabbox, gBrowser };
 }
 
 const ctrlUp = { type: 'keyup', keyCode: 17, DOM_VK_CONTROL: 17, preventDefault() {}, stopPropagation() {} };
@@ -192,4 +198,65 @@ test('compact opens a card-sized popup; the default covers the whole window', ()
   compact.native._openPanel();
   assert.deepStrictEqual([compact.panel.style.width, compact.panel.style.height], ['500px', '']);
   assert.ok(compact.panel.hasAttribute('zac-compact') && compact.panel.opened);
+});
+
+const altTab = (extra = {}) => ({ code: 'Tab', ctrlKey: false, altKey: true, metaKey: false, shiftKey: false, action: null, repeat: false, timeStamp: 1, target: { closest: () => null }, defaultPrevented: false, prevented: false, preventDefault() { this.prevented = true; }, stopPropagation() {}, ...extra });
+
+test('a custom shortcut opens the panel itself and Ctrl+Tab goes back to Firefox', () => {
+  const { win, native, calls, tabbox } = load({ 'zen-arc-ctrltab.shortcut': 'Alt+Tab' });
+  const keydown = win.listeners.keydown[0];
+  native.isOpen = false;
+  const e = altTab();
+  keydown(e);
+  assert.ok(e.prevented);
+  assert.strictEqual(native._timer, 7); // native.open ran
+  assert.deepStrictEqual(env.document.added, ['keyup']);
+  assert.strictEqual(tabbox.handleCtrlTab, true);
+  // Ctrl+Tab is no longer ours: the capture listener and the native handler both leave it alone
+  keydown({ action: 'cycle', ctrlKey: true, code: 'Tab', target: { closest: () => ({}) } });
+  native.onKeyDown({ action: 'cycle' });
+  assert.deepStrictEqual(calls, []);
+});
+
+test('custom shortcut: pressing it again moves on, Shift goes back, other modifiers do not match', () => {
+  const { win, native, calls } = load({ 'zen-arc-ctrltab.shortcut': 'alt + tab' });
+  const keydown = win.listeners.keydown[0];
+  keydown(altTab());
+  keydown(altTab({ shiftKey: true }));
+  keydown(altTab({ ctrlKey: true }));
+  keydown(altTab({ code: 'KeyQ' }));
+  assert.deepStrictEqual(calls, ['next', 'prev']);
+  native.isOpen = false;
+  keydown(altTab({ shiftKey: true }));
+  assert.deepStrictEqual(calls.at(-1), 'showAll');
+});
+
+test('custom shortcut: releasing its modifier picks, unless the panel is sticky', () => {
+  const altUp = { type: 'keyup', key: 'Alt', preventDefault() {}, stopPropagation() {} };
+  const hold = load({ 'zen-arc-ctrltab.shortcut': 'Alt+Tab' });
+  hold.native.handleEvent({ ...altUp, key: 'Shift' }); // not the modifier: Firefox's handler
+  hold.native.handleEvent(altUp);
+  assert.deepStrictEqual(hold.calls, ['keyup', 'pick']);
+  const sticky = load({ 'zen-arc-ctrltab.shortcut': 'Alt+Tab', 'zen-arc-ctrltab.open-mode': 1 });
+  sticky.native.handleEvent(altUp);
+  assert.deepStrictEqual(sticky.calls, []);
+});
+
+test('shortcut parsing: layouts, letters, punctuation; bad text falls back to Ctrl+Tab', () => {
+  const fires = (text, e) => {
+    const { win, native } = load({ 'zen-arc-ctrltab.shortcut': text });
+    native.isOpen = false;
+    const ev = altTab(e);
+    win.listeners.keydown[0](ev);
+    return ev.prevented;
+  };
+  assert.ok(fires('Alt+`', { code: 'Backquote' }));
+  assert.ok(fires('Cmd+Option+Q', { code: 'KeyQ', altKey: true, metaKey: true }));
+  assert.ok(fires('Ctrl+F5', { code: 'F5', altKey: false, ctrlKey: true }));
+  for (const bad of ['Tab', 'Alt', 'Alt+Tab+Q', 'Alt+Nope', '', 'Alt++']) {
+    const { native, tabbox } = load({ 'zen-arc-ctrltab.shortcut': bad });
+    assert.strictEqual(tabbox.handleCtrlTab, false, bad);
+    native.onKeyDown({});
+  }
+  assert.ok(!fires('Ctrl+Tab', {}));
 });

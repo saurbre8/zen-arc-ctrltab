@@ -21,6 +21,44 @@
     return def;
   };
 
+  // The switcher's shortcut: modifiers (Ctrl, Alt, Cmd) plus one key, e.g. "Alt+Tab". Firefox only knows
+  // Ctrl+Tab, so any other shortcut is matched here, by physical key (event.code) so Option+letter on a Mac
+  // still works. Shift is not part of it: it runs the switcher backwards.
+  const MODIFIERS = { ctrl: 'ctrl', control: 'ctrl', alt: 'alt', option: 'alt', opt: 'alt', cmd: 'meta', command: 'meta', meta: 'meta', super: 'meta', win: 'meta' };
+  const HOLD_KEY = { ctrl: 'Control', alt: 'Alt', meta: 'Meta' };
+  const KEY_CODES = {
+    tab: 'Tab', space: 'Space', '`': 'Backquote', backquote: 'Backquote', '-': 'Minus', '=': 'Equal', '[': 'BracketLeft',
+    ']': 'BracketRight', ';': 'Semicolon', "'": 'Quote', ',': 'Comma', '.': 'Period', '/': 'Slash', '\\': 'Backslash',
+    up: 'ArrowUp', down: 'ArrowDown', left: 'ArrowLeft', right: 'ArrowRight', pageup: 'PageUp', pagedown: 'PageDown',
+    home: 'Home', end: 'End', enter: 'Enter', escape: 'Escape', esc: 'Escape', backspace: 'Backspace', delete: 'Delete',
+  };
+  const keyCode = (k) => {
+    if (/^[a-z]$/.test(k)) return 'Key' + k.toUpperCase();
+    if (/^[0-9]$/.test(k)) return 'Digit' + k;
+    if (/^f(?:[1-9]|1[0-2])$/.test(k)) return k.toUpperCase();
+    return KEY_CODES[k];
+  };
+  const parseShortcut = (text) => {
+    const mods = new Set();
+    let code;
+    for (const part of String(text).split('+').map((s) => s.trim().toLowerCase())) {
+      if (MODIFIERS[part]) mods.add(MODIFIERS[part]);
+      else if (!code && keyCode(part)) code = keyCode(part);
+      else return null;
+    }
+    if (!code || !mods.size) return null;
+    if (code === 'Tab' && mods.size === 1 && mods.has('ctrl')) return null; // Firefox's own shortcut
+    return { mods, code, hold: [...mods].map((m) => HOLD_KEY[m]) };
+  };
+  // null means Ctrl+Tab: the default, or a setting that could not be read.
+  let parsed = {};
+  const shortcut = () => {
+    const text = String(pref('shortcut', 'Ctrl+Tab'));
+    if (parsed.text !== text) parsed = { text, value: parseShortcut(text) };
+    return parsed.value;
+  };
+  const matches = (s, e) => e.code === s.code && e.ctrlKey === s.mods.has('ctrl') && e.altKey === s.mods.has('alt') && e.metaKey === s.mods.has('meta');
+
   // Touching ctrlTab loads Firefox's browser-ctrlTab.js, which also defines tabPreviews and tabPreviewPanelHelper.
   const native = ctrlTab;
   const { tabPreviews, tabPreviewPanelHelper } = window;
@@ -33,6 +71,20 @@
   };
   const layout = () => panel.getAttribute('zac-layout');
   const scale = () => Math.min(3, Math.max(0.5, pref('size', 100) / 100));
+
+  // Firefox's switcher takes over Ctrl+Tab from the tab bar. With a shortcut of our own, give Ctrl+Tab back to it,
+  // and make the switcher ignore Ctrl+Tab.
+  const syncCtrlTab = () => { gBrowser.tabbox.handleCtrlTab = !native._recentlyUsedTabs || !!shortcut(); };
+  const init = native._init;
+  native._init = function (enable) {
+    init.call(this, enable);
+    syncCtrlTab();
+  };
+  const onKeyDown = native.onKeyDown;
+  native.onKeyDown = function (event) {
+    if (!shortcut()) return onKeyDown.call(this, event);
+    return undefined;
+  };
 
   // Firefox's switcher has these as its only switches; the mod's settings drive them.
   const apply = () => {
@@ -49,6 +101,7 @@
     const accent = String(pref('accent', '')).trim();
     if (accent) panel.style.setProperty('--ctrltab-accent', accent);
     else panel.style.removeProperty('--ctrltab-accent');
+    syncCtrlTab();
   };
 
   // The popup is a transparent window as big as the browser window ("stage"); the visible panel ("card") is
@@ -130,16 +183,40 @@
     if (layout() === 'split' && e.target._tab) showInPane(e.target._tab);
   });
 
-  // Sticky mode: releasing Ctrl no longer picks, the panel waits for Enter, a click or Esc.
+  // Releasing the shortcut's modifier picks the highlighted tab; Firefox only knows that for Ctrl. In sticky mode
+  // releasing it no longer picks: the panel waits for Enter, a click or Esc.
   const handleEvent = native.handleEvent;
   native.handleEvent = function (event) {
-    if (event.type === 'keyup' && event.keyCode === event.DOM_VK_CONTROL && pref('open-mode', 0) === 1 && this.isOpen) {
-      event.preventDefault();
-      event.stopPropagation();
-      document.removeEventListener('keyup', this, { mozSystemGroup: true });
-      return undefined;
+    const custom = shortcut();
+    const released = event.type === 'keyup' && (custom ? custom.hold.includes(event.key) : event.keyCode === event.DOM_VK_CONTROL);
+    if (!released || !(custom || (pref('open-mode', 0) === 1 && this.isOpen))) return handleEvent.call(this, event);
+    event.preventDefault();
+    event.stopPropagation();
+    document.removeEventListener('keyup', this, { mozSystemGroup: true });
+    if (this.isOpen && pref('open-mode', 0) !== 1) this.pick();
+    return undefined;
+  };
+
+  // Firefox's onKeyDown for a shortcut of our own: open the panel, or step the highlight if it is open.
+  const cycle = (e) => {
+    if (e.defaultPrevented || native.KeyboardLockUtils?.mustWaitForKeyboardLockRequestedReply(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (native.isOpen) {
+      native.advanceFocus(!e.shiftKey);
+      return;
     }
-    return handleEvent.call(this, event);
+    if (e.shiftKey) {
+      native.showAllTabs('shift-tab');
+      return;
+    }
+    document.addEventListener('keyup', native, { mozSystemGroup: true });
+    const tabs = gBrowser.visibleTabs;
+    if (tabs.length > 2) native.open();
+    else if (tabs.length === 2) {
+      const { TabMetrics } = gBrowser;
+      gBrowser.setSelectedTab(tabs[tabs[0].selected ? 1 : 0], TabMetrics.userTriggeredContext(TabMetrics.METRIC_SOURCE.CTRL_TAB));
+    }
   };
 
   // Arrow keys move the highlight; Enter and Esc are the panel's own.
@@ -169,10 +246,12 @@
   // A popup with focus (the translate offer, a permission prompt) takes Tab for itself and marks the event
   // handled, so Firefox's own Ctrl+Tab listener skips it. Catch the shortcut first, on the way down.
   // The same listener slows the key's auto-repeat, so holding Tab steps at a pace the eye can follow.
+  // A shortcut of our own is handled here completely, since Firefox does not know it.
   let lastStep = 0;
   window.addEventListener('keydown', (e) => {
     if (!prefs.getBoolPref('browser.ctrlTab.sortByRecentlyUsed', false)) return;
-    if (ShortcutUtils.getSystemActionForEvent(e) !== ShortcutUtils.CYCLE_TABS) return;
+    const custom = shortcut();
+    if (custom ? !matches(custom, e) : ShortcutUtils.getSystemActionForEvent(e) !== ShortcutUtils.CYCLE_TABS) return;
     const rate = pref('repeat-speed', 8);
     if (e.repeat && rate && e.timeStamp - lastStep < 1000 / rate) {
       e.preventDefault();
@@ -180,6 +259,10 @@
       return;
     }
     lastStep = e.timeStamp;
+    if (custom) {
+      cycle(e);
+      return;
+    }
     const popup = e.target.closest?.('panel, menupopup, [popover]');
     if (popup && popup !== panel) native.onKeyDown(e);
   }, true);

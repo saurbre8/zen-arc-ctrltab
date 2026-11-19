@@ -11,14 +11,21 @@
     "margin": "15px 0 15px 0"
   },
   {
+    "type": "string",
+    "property": "zen-arc-ctrltab.shortcut",
+    "label": "Shortcut: Ctrl, Alt or Cmd plus one key, like Alt+Tab, Ctrl+Q or Alt+` (Shift runs it backwards). Anything else, or empty, means Ctrl+Tab. With another shortcut, Ctrl+Tab cycles tabs in tab-bar order again.",
+    "placeholder": "Ctrl+Tab",
+    "defaultValue": "Ctrl+Tab"
+  },
+  {
     "type": "dropdown",
     "property": "zen-arc-ctrltab.open-mode",
     "value": "number",
     "label": "How the panel works",
     "defaultValue": 0,
     "options": [
-      { "label": "Hold Ctrl, press Tab to move, release Ctrl to switch", "value": 0 },
-      { "label": "Press Ctrl+Tab once: the panel stays open (Enter or click to switch, Esc to cancel)", "value": 1 }
+      { "label": "Hold the shortcut's modifier (Ctrl by default), press its key to move, release the modifier to switch", "value": 0 },
+      { "label": "Press the shortcut once: the panel stays open (Enter or click to switch, Esc to cancel)", "value": 1 }
     ]
   },
   {
